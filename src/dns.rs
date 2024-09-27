@@ -1,34 +1,29 @@
 use crate::config::Config;
-use crate::Log;
 use domain::base::iana::Class;
 use domain::base::{Dname, Rtype};
 use domain::rdata::A;
 use rand::prelude::*;
 use std::net::IpAddr;
 use std::ops::Deref;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 pub struct DnsResolver {
-    pub config: Rc<Config>,
-    pub log: Arc<Log>,
+    pub config: Arc<Config>,
     pub runtime: Arc<Runtime>,
 }
 
 impl DnsResolver {
-    pub fn new(config: Rc<Config>, log: Arc<Log>, runtime: Arc<Runtime>) -> Self {
+    pub fn new(config: Arc<Config>, runtime: Arc<Runtime>) -> Self {
         Self {
             config,
-            log,
             runtime,
         }
     }
 
     fn resolve_to_ip_list(&self, remote: String) -> Vec<IpAddr> {
-        self.log
-            .append(format!("Looking up into '{}'...", remote).as_str());
+        tracing::info!("Looking up into '{}'...", remote);
 
         let resolver = domain::resolv::StubResolver::new();
         let d: domain::base::Dname<Vec<u8>> = Dname::from_str(&remote).unwrap();
@@ -45,7 +40,7 @@ impl DnsResolver {
             .map(|v| v.into_data())
             .map(|v| v.addr())
             .map(|v| IpAddr::V4(v))
-            .inspect(|v| self.log.append(format!("Resolved '{}'.", v).as_str()))
+            .inspect(|v| tracing::info!("Resolved '{}'.", v))
             .collect::<Vec<_>>();
         all
     }
@@ -60,9 +55,8 @@ impl DnsResolver {
 
         let mut all = self.resolve_to_ip_list(remote_with_rng_domain.clone());
         if all.is_empty() {
-            self.log
-                .append(format!("Unable to resolve any addresses at '{}'.", remote_with_rng_domain.as_str()));
-            self.log.append("Attempting to resolve without any randomized domain...");
+            tracing::warn!("Unable to resolve any addresses at '{}'.", remote_with_rng_domain);
+            tracing::warn!("Attempting to resolve without any randomized domain...");
             all = self.resolve_to_ip_list(remote.0);
         };
 

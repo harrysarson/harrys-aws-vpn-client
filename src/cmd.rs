@@ -1,5 +1,5 @@
+use crate::local_config::LocalConfig;
 use crate::saml_server::Saml;
-use crate::{LocalConfig, Log};
 use lazy_static::lazy_static;
 use std::env;
 use std::ffi::OsString;
@@ -36,7 +36,7 @@ pub struct AwsSaml {
     pub pwd: String,
 }
 
-pub async fn run_ovpn(log: Arc<Log>, config: PathBuf, addr: String, port: u16) -> AwsSaml {
+pub async fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
     let path = Path::new(SHARED_DIR.as_str()).join(DEFAULT_PWD_FILE);
     if !path.exists() {
         println!("{:?} does not exist in {:?}!", path, env::current_dir().unwrap());
@@ -62,7 +62,6 @@ pub async fn run_ovpn(log: Arc<Log>, config: PathBuf, addr: String, port: u16) -
     let stdout = out.stdout.unwrap();
 
     let buf = tokio::io::BufReader::new(stdout);
-    let log = log.clone();
     let mut lines = buf.lines();
 
     let mut next = lines.next_line().await;
@@ -72,12 +71,12 @@ pub async fn run_ovpn(log: Arc<Log>, config: PathBuf, addr: String, port: u16) -
     loop {
         if let Ok(ref line) = next {
             if let Some(line) = line {
-                log.append_process(pid, line.as_str());
+                tracing::info!("[{pid}] {line}");
                 let auth_prefix = "AUTH_FAILED,CRV1";
                 let prefix = "https://";
 
                 if line.contains(auth_prefix) {
-                    log.append_process(pid, format!("Found {} redirect url", line).as_str());
+                    tracing::info!("[{pid}] Found {line} redirect url");
                     let find = line.find(prefix).unwrap();
                     addr = Some((&line[find..]).to_string());
 
@@ -107,7 +106,6 @@ pub async fn run_ovpn(log: Arc<Log>, config: PathBuf, addr: String, port: u16) -
 }
 
 pub async fn connect_ovpn(
-    log: Arc<Log>,
     config: PathBuf,
     addr: String,
     port: u16,
@@ -163,7 +161,6 @@ pub async fn connect_ovpn(
     let stdout = out.stdout.take().unwrap();
 
     let buf = tokio::io::BufReader::new(stdout);
-    let log = log.clone();
     let mut lines = buf.lines();
 
     let mut next = lines.next_line().await;
@@ -171,7 +168,7 @@ pub async fn connect_ovpn(
     loop {
         if let Ok(ref line) = next {
             if let Some(line) = line {
-                log.append_process(pid, line.as_str());
+                tracing::info!("[{pid}] {line}");
             } else {
                 break;
             }

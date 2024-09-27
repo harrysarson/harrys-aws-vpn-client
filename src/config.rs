@@ -34,9 +34,6 @@ pub struct Pwd {
     pub pwd: String,
 }
 
-unsafe impl Send for Pwd {}
-unsafe impl Sync for Pwd {}
-
 impl Config {
     pub fn new() -> Config {
         Config {
