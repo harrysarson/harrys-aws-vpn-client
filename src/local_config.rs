@@ -75,7 +75,7 @@ impl LocalConfig {
                     .write(true)
                     .read(true)
                     .create(true)
-                    .open(&d)
+                    .ope(&d)
                     .unwrap()
             })
     }

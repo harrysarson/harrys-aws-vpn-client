@@ -27,7 +27,7 @@ pub struct Config {
     pub addresses: Arc<StdMutex<Option<Vec<IpAddr>>>>,
     pub remote: Arc<StdMutex<Option<(String, u16)>>>,
     pub config: Arc<StdMutex<Option<PathBuf>>>,
-    pub pwd: Arc<TokioMutex<Option<Pwd>>>,
+    pub pwd: Arc<StdMutex<Option<Pwd>>>,
 }
 
 pub struct Pwd {
@@ -40,7 +40,7 @@ impl Config {
             addresses: Arc::new(StdMutex::new(None)),
             remote: Arc::new(StdMutex::new(None)),
             config: Arc::new(StdMutex::new(None)),
-            pwd: Arc::new(TokioMutex::new(None)),
+            pwd: Arc::new(StdMutex::new(None)),
         }
     }
 

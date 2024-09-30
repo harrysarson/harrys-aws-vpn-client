@@ -17,46 +17,41 @@ use crate::manager::ConnectionManager;
 use crate::saml_server::SamlServer;
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 fn main() {
     tracing_subscriber::fmt::init();
 
     let vpn_app = Arc::new(VpnApp::new());
+
     let saml_server = SamlServer::new();
-    let handle = saml_server.start_server(vpn_app.clone());
+    thread::scope(|s| {
+        tracing::debug!("In main() scope");
+        s.spawn(|| saml_server.start_server(vpn_app.clone()));
 
-    let vpn_app = vpn_app.clone();
-    let connection_manager = ConnectionManager::new();
-    connection_manager.set_app(vpn_app.clone());
-    vpn_app.set_connection_manager(connection_manager);
+        let vpn_app = vpn_app.clone();
+        build_main_grid(vpn_app.clone());
 
-    build_main_grid(vpn_app.clone());
+        if let Some(p) = LocalConfig::read_last_pid() {
+            tracing::warn!("[{p}] Last OpenVPN session was not closed properly...");
+            tracing::warn!("[{p}] Asking to kill it in 5 seconds...");
+            s.spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                kill_openvpn(p);
+            });
+        }
 
-    if let Some(p) = LocalConfig::read_last_pid() {
-        tracing::warn!("[{p}] Last OpenVPN session was not closed properly...");
-        tracing::warn!("[{p}] Asking to kill it in 5 seconds...");
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(5));
-            kill_openvpn(p);
-        });
-    }
+        let mut  manager = vpn_app.connection_manager.lock().unwrap();
+        manager.change_connect_state(s, &vpn_app);
+    });
 
-    {
-        let manager = vpn_app.connection_manager.lock().unwrap();
-        manager.as_ref().unwrap().change_connect_state();
-    }
+    let mut manager = vpn_app.connection_manager.lock().unwrap();
+    manager.force_disconnect(&vpn_app);
 
-    handle.join().unwrap();
-
-    let manager = vpn_app.connection_manager.lock().unwrap();
-    if let Some(manager) = manager.as_ref() {
-        manager.force_disconnect();
-    }
 }
 
 fn build_main_grid(app: Arc<VpnApp>) {
-
     if let Some(c) = LocalConfig::read_last_file() {
         set_file(c, &app, &app.dns);
     }

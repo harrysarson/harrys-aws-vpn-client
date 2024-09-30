@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{remove_file, File};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,8 @@ const DEFAULT_PWD_FILE: &str = "./pwd.txt";
 
 lazy_static! {
     static ref SHARED_DIR: String = std::env::var("SHARED_DIR").unwrap_or("./share".to_string());
-    static ref OPENVPN_FILE: String = std::env::var("OPENVPN_FILE").unwrap_or("./openvpn/bin/openvpn".to_string());
+    static ref OPENVPN_FILE: String =
+        std::env::var("OPENVPN_FILE").unwrap_or("./openvpn/bin/openvpn".to_string());
 }
 
 pub struct ProcessInfo {
@@ -36,12 +37,16 @@ pub struct AwsSaml {
     pub pwd: String,
 }
 
-pub async fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
+pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
     let path = Path::new(SHARED_DIR.as_str()).join(DEFAULT_PWD_FILE);
     if !path.exists() {
-        println!("{:?} does not exist in {:?}!", path, env::current_dir().unwrap());
+        println!(
+            "{:?} does not exist in {:?}!",
+            path,
+            env::current_dir().unwrap()
+        );
     }
-    let out = tokio::process::Command::new(OPENVPN_FILE.as_str())
+    let out = Command::new(OPENVPN_FILE.as_str())
         .arg("--config")
         .arg(config)
         .arg("--verb")
@@ -58,45 +63,34 @@ pub async fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
         .spawn()
         .unwrap();
 
-    let pid = out.id().unwrap();
+    let pid = out.id();
     let stdout = out.stdout.unwrap();
 
-    let buf = tokio::io::BufReader::new(stdout);
-    let mut lines = buf.lines();
+    let buf = BufReader::new(stdout);
 
-    let mut next = lines.next_line().await;
     let mut addr = None::<String>;
     let mut pwd = None::<String>;
 
-    loop {
-        if let Ok(ref line) = next {
-            if let Some(line) = line {
-                tracing::info!("[{pid}] {line}");
-                let auth_prefix = "AUTH_FAILED,CRV1";
-                let prefix = "https://";
+    for line in buf.lines() {
+        let line = line.unwrap();
+        tracing::info!("[{pid}] {line}");
+        let auth_prefix = "AUTH_FAILED,CRV1";
+        let prefix = "https://";
 
-                if line.contains(auth_prefix) {
-                    tracing::info!("[{pid}] Found {line} redirect url");
-                    let find = line.find(prefix).unwrap();
-                    addr = Some((&line[find..]).to_string());
+        if line.contains(auth_prefix) {
+            tracing::info!("[{pid}] Found {line} redirect url");
+            let find = line.find(prefix).unwrap();
+            addr = Some((&line[find..]).to_string());
 
-                    let auth_find = line
-                        .find(auth_prefix)
-                        .map(|v| v + auth_prefix.len() + 1)
-                        .unwrap();
+            let auth_find = line
+                .find(auth_prefix)
+                .map(|v| v + auth_prefix.len() + 1)
+                .unwrap();
 
-                    let sub = &line[auth_find..find - 1];
-                    let e = sub.split(":").skip(1).next().unwrap();
-                    pwd = Some(e.to_string());
-                }
-            } else {
-                break;
-            }
-        } else {
-            break;
+            let sub = &line[auth_find..find - 1];
+            let e = sub.split(":").skip(1).next().unwrap();
+            pwd = Some(e.to_string());
         }
-
-        next = lines.next_line().await;
     }
 
     AwsSaml {

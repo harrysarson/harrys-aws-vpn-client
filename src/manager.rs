@@ -4,76 +4,57 @@ use crate::config::Pwd;
 use crate::task::OavcTask;
 use crate::VpnApp;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
+use std::thread::Scope;
 
 pub struct ConnectionManager {
-    pub app: Mutex<Weak<VpnApp>>,
-    pub state: Arc<Mutex<State>>,
+    pub state: State,
 }
 
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
-            app: Mutex::new(Weak::new()),
-            state:  Arc::new(Mutex::new(State::Disconnected)),
+            state: State::Disconnected,
         }
     }
 
-    pub fn set_app(&self, app: Arc<VpnApp>) {
-        let mut l = self.app.lock().unwrap();
-        *l = Arc::downgrade(&app);
-    }
+    pub fn change_connect_state<'scope, 'env>(&mut self, s: &'scope Scope<'scope, 'env>, app: &VpnApp) {
+        tracing::info!("Handling change... {:?}", &self.state);
 
-    pub fn change_connect_state(&self) {
-        let state = {
-            let state = { *(self.state.lock().unwrap()) };
-            tracing::info!("Handling change... {:?}", &state);
-            state
-        };
-
-        match state {
-            State::Disconnected => self.connect(),
-            State::Connected => self.disconnect(),
-            State::Connecting => self.try_disconnect(),
+        match self.state {
+            State::Disconnected => self.connect(s, app),
+            State::Connected => self.disconnect(app),
+            State::Connecting => self.try_disconnect(app),
         }
     }
 
-    pub fn try_disconnect(&self) {
-        let state = {
-            let state = { *(self.state.lock().unwrap()) };
-            tracing::info!("Handling disconnect... {:?}", &state);
-            state
-        };
+    pub fn try_disconnect(&mut self, app: &VpnApp) {
+        tracing::info!("Handling disconnect... {:?}", &self.state);
 
-        match state {
+        match self.state {
             State::Disconnected => (),
-            _ => self.disconnect(),
+            _ => self.disconnect(app),
         }
     }
 
-    fn connect(&self) {
+    fn connect<'scope>(&mut self, s: &'scope Scope<'scope, '_>, app: &VpnApp) {
         tracing::info!("Connecting...");
         self.set_connecting();
 
-        let (file, remote, addrs) = {
-            let app = self.app.lock().unwrap();
-            let app = app.upgrade().unwrap();
-
-            (
-                {
-                    let x = app.config.config.lock().unwrap().deref().clone();
-                    x
-                },
-                {
-                    let x = app.config.remote.lock().unwrap().deref().clone();
-                    x
-                },
-                {
-                    let x = app.config.addresses.lock().unwrap().deref().clone();
-                    x
-                },
-            )
-        };
+        let (file, remote, addrs) = (
+            {
+                let x = app.config.config.lock().unwrap().deref().clone();
+                x
+            },
+            {
+                let x = app.config.remote.lock().unwrap().deref().clone();
+                x
+            },
+            {
+                let x = app.config.addresses.lock().unwrap().deref().clone();
+                x
+            },
+        );
 
         if let Some(ref addrs) = addrs {
             if let Some(ref remote) = remote {
@@ -83,30 +64,20 @@ impl ConnectionManager {
                     let port = remote.1;
 
                     let pwd = {
-                        let app = self.app.lock().unwrap();
-                        let app = app.upgrade().unwrap();
                         app.config.pwd.clone()
                     };
 
-                    let join = {
-                        let app = self.app.lock().unwrap();
-                        let app = app.upgrade().unwrap();
 
-                        app.runtime.spawn(async move {
-                            let mut lock = pwd.lock().await;
-                            let auth = run_ovpn(config_file, first_addr, port).await; // Failure point addrs[0]
-                            *lock = Some(Pwd { pwd: auth.pwd });
 
-                            open::that(auth.url).unwrap()
-                        })
-                    };
+                    s.spawn(move || {
+                        let mut lock = pwd.lock().unwrap();
+                        let auth = run_ovpn(config_file, first_addr, port);
+                        *lock = Some(Pwd { pwd: auth.pwd });
 
-                    let app = self.app.lock().unwrap();
-                    let app = app.upgrade().unwrap();
-                    app.openvpn.lock().unwrap().replace(OavcTask {
-                        name: "OpenVPN Initial SAML Process".to_string(),
-                        handle: join,
+                        open::that(auth.url).unwrap()
                     });
+
+
                 }
                 return;
             }
@@ -115,32 +86,18 @@ impl ConnectionManager {
         tracing::error!("No file selected");
     }
 
-    pub fn force_disconnect(&self) {
+    pub fn force_disconnect(&mut self, app: &VpnApp) {
         tracing::warn!("Forcing disconnect...");
 
-        let app = self.app.lock().unwrap();
-        let app = app.upgrade().unwrap();
-        let mut openvpn = app.openvpn.lock().unwrap();
-
-        if let Some(ref srv) = openvpn.take() {
-            srv.abort(false);
-        }
-
-        let openvpn_connection = app.openvpn_connection.clone();
-        let mut openvpn_connection = openvpn_connection.lock().unwrap();
-        if let Some(ref conn) = openvpn_connection.take() {
-            conn.abort(false);
-        }
+        self.disconnect(app);
     }
 
-    fn disconnect(&self) {
+    fn disconnect(&mut self, app: &VpnApp) {
         tracing::info!("Disconnecting...");
 
         self.set_disconnected();
 
         {
-            let app = self.app.lock().unwrap();
-            let app = app.upgrade().unwrap();
 
             let mut openvpn = app.openvpn.lock().unwrap();
 
@@ -160,15 +117,15 @@ impl ConnectionManager {
         }
     }
 
-    fn set_connecting(&self) {
-        *self.state.lock().unwrap() = State::Connecting;
+    fn set_connecting(&mut self) {
+        self.state = State::Connecting;
     }
 
-    pub fn set_connected(&self) {
-        *self.state.lock().unwrap() = State::Connected;
+    pub fn set_connected(&mut self) {
+        self.state = State::Connected;
     }
 
-    fn set_disconnected(&self) {
-        *self.state.lock().unwrap() = State::Disconnected;
+    fn set_disconnected(&mut self) {
+        self.state = State::Disconnected;
     }
 }

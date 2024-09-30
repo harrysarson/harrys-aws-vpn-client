@@ -5,8 +5,7 @@ use crate::VpnApp;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use warp::http::StatusCode;
 use warp::reply::WithStatus;
 use warp::{Filter, Rejection};
@@ -18,7 +17,7 @@ impl SamlServer {
         SamlServer {}
     }
 
-    pub fn start_server(&self, app: Arc<VpnApp>) -> std::thread::JoinHandle<()> {
+    pub fn start_server(&self, app: Arc<VpnApp>) {
         tracing::info!("Starting SAML server at 0.0.0.0:35001...");
         let (tx, rx) = std::sync::mpsc::sync_channel::<Saml>(1);
 
@@ -37,10 +36,10 @@ impl SamlServer {
                             sender: SyncSender<Saml>,
                             pwd: Arc<Mutex<Option<Pwd>>>| {
                 async move {
-                    let pwd = pwd.lock().await;
+                    let pwd = pwd.lock().unwrap().as_ref().unwrap().pwd.clone();
                     let saml = Saml {
                         data: data["SAMLResponse"].clone(),
-                        pwd: pwd.deref().as_ref().unwrap().pwd.clone(),
+                        pwd,
                     };
                     sender.send(saml).unwrap();
                     println!("Got SAML data!");
@@ -66,7 +65,7 @@ impl SamlServer {
         let st = app.openvpn_connection.clone();
         let manager = app.connection_manager.clone();
 
-        std::thread::spawn(move || loop {
+        loop {
             let data = rx.recv().unwrap();
             {
                 tracing::info!("SAML Data: {:?}...", &data.data[..6]);
@@ -93,10 +92,11 @@ impl SamlServer {
             let handle = {
                 let info = info.clone();
                 let manager = manager.clone();
+                let app = app.clone();
                 runtime.clone().spawn(async move {
                     let con = connect_ovpn( config, addr, port, data, info).await;
-                    let man = manager.lock().unwrap();
-                    man.as_ref().unwrap().try_disconnect();
+                    let mut man = manager.lock().unwrap();
+                    man.try_disconnect(&app);
                     con
                 })
             };
@@ -108,8 +108,8 @@ impl SamlServer {
                 *st = Some(task);
             }
 
-            manager.lock().unwrap().as_ref().unwrap().set_connected();
-        })
+            manager.lock().unwrap().set_connected();
+        }
     }
 }
 

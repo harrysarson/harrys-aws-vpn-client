@@ -12,7 +12,7 @@ pub struct VpnApp {
     pub openvpn_connection: Arc<Mutex<Option<OavcProcessTask<i32>>>>,
     pub runtime: Arc<Runtime>,
     pub dns: Arc<DnsResolver>,
-    pub connection_manager: Arc<Mutex<Option<ConnectionManager>>>,
+    pub connection_manager: Arc<Mutex<ConnectionManager>>,
 }
 
 impl VpnApp {
@@ -31,15 +31,10 @@ impl VpnApp {
             openvpn_connection: Arc::new(Mutex::new(None)),
             runtime: runtime.clone(),
             dns: Arc::new(DnsResolver::new(config, runtime)),
-            connection_manager: Arc::new(Mutex::new(None)),
+            connection_manager: Arc::new(Mutex::new(ConnectionManager::new())),
         }
     }
 
-
-    pub fn set_connection_manager(&self, manager: ConnectionManager) {
-        let mut current = self.connection_manager.lock().unwrap();
-        *current = Some(manager)
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
