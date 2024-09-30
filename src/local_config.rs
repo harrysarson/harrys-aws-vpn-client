@@ -14,10 +14,10 @@ impl LocalConfig {
             .map(|mut f| {
                 let mut s = String::new();
                 f.read_to_string(&mut s).unwrap();
-                s.replace("\n", "")
+                s.replace('\n', "")
             })
-            .filter(|s| s.len() > 0)
-            .map(|s| PathBuf::from(s))
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
             .filter(|p| p.exists())
     }
 
@@ -35,17 +35,23 @@ impl LocalConfig {
     }
 
     pub fn read_last_pid() -> Option<u32> {
-        LocalConfig::config_file("last_ovpn_pid")
-            .filter(|f| f.metadata().map(|m| m.len()).unwrap_or(0) > 0)
-            .map(|mut f| {
-                let mut s = String::new();
-                f.read_to_string(&mut s).unwrap();
-                s.replace("\n", "")
-            })
-            .filter(|s| s.len() > 0)
-            .map(|s| s.parse::<u32>())
-            .filter(|p| p.is_ok())
-            .map(|p| p.unwrap())
+        let mut f = LocalConfig::config_file("last_ovpn_pid")?;
+
+        if f.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            return None;
+        }
+
+        let s = {
+            let mut s = String::new();
+            f.read_to_string(&mut s).unwrap();
+            s.replace('\n', "")
+        };
+
+        if s.is_empty() {
+            return None;
+        }
+
+        s.parse::<u32>().ok()
     }
 
     pub fn save_last_pid(last: Option<u32>) {
@@ -54,7 +60,7 @@ impl LocalConfig {
         if let Some(mut p) = p {
             p.set_len(0).unwrap();
             if let Some(last) = last {
-                write!(p, "{}", last).unwrap();
+                write!(p, "{last}").unwrap();
             } else {
                 write!(p, "").unwrap();
             }
@@ -75,7 +81,7 @@ impl LocalConfig {
                     .write(true)
                     .read(true)
                     .create(true)
-                    .ope(&d)
+                    .open(d)
                     .unwrap()
             })
     }

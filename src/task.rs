@@ -40,7 +40,7 @@ impl<T> OavcProcessTask<T> {
             let pid = self.info.pid.lock().unwrap();
 
             if let Some(ref pid) = *pid {
-                kill_openvpn(*pid)
+                kill_openvpn(*pid);
             }
 
             if log {

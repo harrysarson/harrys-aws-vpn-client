@@ -11,53 +11,50 @@ use tokio::runtime::Runtime;
 
 pub struct DnsResolver {
     pub config: Arc<Config>,
-    pub runtime: Arc<Runtime>,
 }
 
 impl DnsResolver {
-    pub fn new(config: Arc<Config>, runtime: Arc<Runtime>) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         Self {
             config,
-            runtime,
         }
     }
 
-    fn resolve_to_ip_list(&self, remote: String) -> Vec<IpAddr> {
+    fn resolve_to_ip_list(remote: &str, runtime: &Runtime) -> Vec<IpAddr> {
         tracing::info!("Looking up into '{}'...", remote);
 
         let resolver = domain::resolv::StubResolver::new();
-        let d: domain::base::Dname<Vec<u8>> = Dname::from_str(&remote).unwrap();
-        let r = self
-            .runtime
+        let d: domain::base::Dname<Vec<u8>> = Dname::from_str(remote).unwrap();
+        let r = runtime
             .block_on(async { resolver.query((d, Rtype::A, Class::In)).await })
             .unwrap();
 
         let msg = r.into_message();
         let ans = msg.answer().unwrap().limit_to::<A>();
-        let all = ans
-            .filter(|v| v.is_ok())
-            .map(|v| v.unwrap())
-            .map(|v| v.into_data())
-            .map(|v| v.addr())
-            .map(|v| IpAddr::V4(v))
-            .inspect(|v| tracing::info!("Resolved '{}'.", v))
-            .collect::<Vec<_>>();
-        all
+
+        ans
+            .filter_map(|v| {
+                let v = v.ok()?;
+                let v = IpAddr::V4(v.into_data().addr());
+                tracing::info!("Resolved '{}'.", v);
+                Some(v)
+            })
+            .collect::<Vec<_>>()
     }
 
 
-    pub fn resolve_addresses(&self) {
-        let remote = self.config.remote.lock().unwrap().deref().clone().unwrap();
+    pub fn resolve_addresses(&self, runtime: &Runtime) {
+        let remote = self.config.get_remote();
 
         let random_start = rng_domain();
         let remote_with_rng_domain = format!("{}.{}", random_start, remote.0);
 
 
-        let mut all = self.resolve_to_ip_list(remote_with_rng_domain.clone());
+        let mut all = Self::resolve_to_ip_list(&remote_with_rng_domain, runtime);
         if all.is_empty() {
             tracing::warn!("Unable to resolve any addresses at '{}'.", remote_with_rng_domain);
             tracing::warn!("Attempting to resolve without any randomized domain...");
-            all = self.resolve_to_ip_list(remote.0);
+            all = Self::resolve_to_ip_list(&remote.0, runtime);
         };
 
 

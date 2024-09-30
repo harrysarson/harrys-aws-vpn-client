@@ -1,10 +1,8 @@
 use crate::app::State;
 use crate::cmd::run_ovpn;
-use crate::config::Pwd;
-use crate::task::OavcTask;
+use crate::config::{Pwd};
 use crate::VpnApp;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
 use std::thread::Scope;
 
 pub struct ConnectionManager {
@@ -18,7 +16,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn change_connect_state<'scope, 'env>(&mut self, s: &'scope Scope<'scope, 'env>, app: &VpnApp) {
+    pub fn change_connect_state<'scope>(&mut self, s: &'scope Scope<'scope, '_>, app: &VpnApp) {
         tracing::info!("Handling change... {:?}", &self.state);
 
         match self.state {
@@ -41,46 +39,31 @@ impl ConnectionManager {
         tracing::info!("Connecting...");
         self.set_connecting();
 
-        let (file, remote, addrs) = (
-            {
-                let x = app.config.config.lock().unwrap().deref().clone();
-                x
-            },
-            {
-                let x = app.config.remote.lock().unwrap().deref().clone();
-                x
-            },
-            {
-                let x = app.config.addresses.lock().unwrap().deref().clone();
-                x
-            },
-        );
+        let (addrs,) = ({
+            let x = app.config.addresses.lock().unwrap().deref().clone();
+            x
+        },);
+
+        let remote = app.config.get_remote();
 
         if let Some(ref addrs) = addrs {
-            if let Some(ref remote) = remote {
-                if let Some(ref file) = file {
-                    let first_addr = addrs[0].to_string();
-                    let config_file = file.clone();
-                    let port = remote.1;
+            let first_addr = addrs[0].to_string();
+            let port = remote.1;
 
-                    let pwd = {
-                        app.config.pwd.clone()
-                    };
+            let pwd = { app.config.pwd.clone() };
 
+            let temp = tempfile::NamedTempFile::new().unwrap();
+            app.config.save_config(temp.path());
 
+            s.spawn(move || {
+                let mut lock = pwd.lock().unwrap();
+                let auth = run_ovpn(temp.path(), first_addr, port);
+                *lock = Some(Pwd { pwd: auth.pwd });
 
-                    s.spawn(move || {
-                        let mut lock = pwd.lock().unwrap();
-                        let auth = run_ovpn(config_file, first_addr, port);
-                        *lock = Some(Pwd { pwd: auth.pwd });
+                open::that(auth.url).unwrap();
+            });
 
-                        open::that(auth.url).unwrap()
-                    });
-
-
-                }
-                return;
-            }
+            return;
         }
 
         tracing::error!("No file selected");
@@ -98,7 +81,6 @@ impl ConnectionManager {
         self.set_disconnected();
 
         {
-
             let mut openvpn = app.openvpn.lock().unwrap();
 
             if let Some(ref srv) = openvpn.take() {

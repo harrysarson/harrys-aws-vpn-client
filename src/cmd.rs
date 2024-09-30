@@ -37,7 +37,8 @@ pub struct AwsSaml {
     pub pwd: String,
 }
 
-pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
+pub fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
+    let config = config.as_ref();
     let path = Path::new(SHARED_DIR.as_str()).join(DEFAULT_PWD_FILE);
     if !path.exists() {
         println!(
@@ -55,7 +56,7 @@ pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
         .arg("udp")
         .arg("--remote")
         .arg(addr)
-        .arg(format!("{}", port))
+        .arg(format!("{port}"))
         .arg("--auth-user-pass")
         .arg(DEFAULT_PWD_FILE)
         .stdout(Stdio::piped())
@@ -80,7 +81,7 @@ pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
         if line.contains(auth_prefix) {
             tracing::info!("[{pid}] Found {line} redirect url");
             let find = line.find(prefix).unwrap();
-            addr = Some((&line[find..]).to_string());
+            addr = Some(line[find..].to_string());
 
             let auth_find = line
                 .find(auth_prefix)
@@ -88,7 +89,7 @@ pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
                 .unwrap();
 
             let sub = &line[auth_find..find - 1];
-            let e = sub.split(":").skip(1).next().unwrap();
+            let e = sub.split(':').nth(1).unwrap();
             pwd = Some(e.to_string());
         }
     }
@@ -100,12 +101,13 @@ pub fn run_ovpn(config: PathBuf, addr: String, port: u16) -> AwsSaml {
 }
 
 pub async fn connect_ovpn(
-    config: PathBuf,
+    config: impl AsRef<Path>,
     addr: String,
     port: u16,
     saml: Saml,
     process_info: Arc<ProcessInfo>,
 ) -> i32 {
+    let config = config.as_ref();
     let temp = TempDir::new().unwrap();
     let temp_pwd = temp.child("pwd.txt");
 
@@ -116,7 +118,7 @@ pub async fn connect_ovpn(
     let mut save = File::create(&temp_pwd).unwrap();
     write!(save, "N/A\nCRV1::{}::{}\n", saml.pwd, saml.data).unwrap();
 
-    let b = std::fs::canonicalize(temp_pwd).unwrap().to_path_buf();
+    let b = std::fs::canonicalize(temp_pwd).unwrap().clone();
 
     let mut out = tokio::process::Command::new("pkexec")
         .arg(OPENVPN_FILE.as_str())
@@ -131,7 +133,7 @@ pub async fn connect_ovpn(
         .arg("udp")
         .arg("--remote")
         .arg(addr)
-        .arg(format!("{}", port))
+        .arg(format!("{port}"))
         .arg("--script-security")
         .arg("2")
         .arg("--route-up")
@@ -160,12 +162,8 @@ pub async fn connect_ovpn(
     let mut next = lines.next_line().await;
 
     loop {
-        if let Ok(ref line) = next {
-            if let Some(line) = line {
-                tracing::info!("[{pid}] {line}");
-            } else {
-                break;
-            }
+        if let Ok(Some(line)) = next {
+            tracing::info!("[{pid}] {line}");
         } else {
             break;
         }
@@ -186,21 +184,21 @@ pub fn kill_openvpn(pid: u32) {
         .arg("-o")
         .arg("cmd")
         .arg("-p")
-        .arg(format!("{}", pid))
+        .arg(format!("{pid}"))
         .output()
         .unwrap();
 
     if let Ok(msg) = String::from_utf8(info.stdout) {
-        let last = msg.lines().rev().next();
+        let last = msg.lines().next_back();
         if let Some(last) = last {
-            if last.len() > 0 && last.chars().next().map(|v| v == '/').unwrap_or(false) {
+            if !last.is_empty() && last.chars().next().is_some_and(|v| v == '/') {
                 if last.contains("openvpn --config /")
                     && last.contains("--auth-user-pass /")
                     && last.ends_with("pwd.txt")
                 {
                     let mut p = Command::new("pkexec")
                         .arg("kill")
-                        .arg(format!("{}", pid))
+                        .arg(format!("{pid}"))
                         .spawn()
                         .unwrap();
 
