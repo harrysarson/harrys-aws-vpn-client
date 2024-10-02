@@ -2,9 +2,8 @@ use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
-use std::net::IpAddr;
+use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 lazy_static! {
     static ref CLEAN_KEYS: HashSet<String> = {
@@ -18,32 +17,39 @@ lazy_static! {
     };
 }
 
-pub struct Config {
-    pub addresses: Arc<Mutex<Option<Vec<IpAddr>>>>,
-    pub pwd: Arc<Mutex<Option<Pwd>>>,
-    pub contents: Arc<Mutex<String>>,
+pub(crate) struct Config {
+    contents: String,
 }
 
-pub struct Pwd {
-    pub pwd: String,
+pub(crate) struct Pwd {
+    pwd: String,
+}
+impl Pwd {
+    pub(crate) fn new(pwd: String) -> Self {
+        Self { pwd }
+    }
+}
+
+impl Deref for Pwd {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pwd
+    }
 }
 
 impl Config {
-    pub fn new() -> Config {
+    pub(crate) fn new(p: impl AsRef<Path>) -> Config {
         Config {
-            addresses: Arc::new(Mutex::new(None)),
-            pwd: Arc::new(Mutex::new(None)),
-            contents: Arc::new(Mutex::new(String::new())),
+            contents: std::fs::read_to_string(p).unwrap(),
         }
     }
 
-    pub fn save_config<P: AsRef<Path>>(&self, path: P) {
+    pub(crate) fn save_config<P: AsRef<Path>>(&self, path: P) {
         let path = path.as_ref();
 
         let new_contents = self
             .contents
-            .lock()
-            .unwrap()
             .lines()
             .filter(|l| !has_key(l))
             .map(std::string::ToString::to_string)
@@ -55,11 +61,9 @@ impl Config {
         tracing::info!("Saved at {:?}", &path);
     }
 
-    pub fn get_remote(&self) -> (String, u16) {
-        return self
+    pub(crate) fn get_remote(&self) -> (String, u16) {
+        self
             .contents
-            .lock()
-            .unwrap()
             .lines()
             .filter(|p| p.starts_with("remote "))
             .map(|p| {
@@ -68,7 +72,7 @@ impl Config {
                 (addr, port)
             })
             .next()
-            .unwrap();
+            .unwrap()
     }
 }
 

@@ -1,15 +1,14 @@
-use crate::local_config::LocalConfig;
 use crate::saml_server::Saml;
-use lazy_static::lazy_static;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{remove_file, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{ Stdio};
+use std::io::Write;
+use std::time::Duration;
+use lazy_static::lazy_static;
 use temp_dir::TempDir;
-use tokio::io::AsyncBufReadExt;
 
 const DEFAULT_PWD_FILE: &str = "./pwd.txt";
 
@@ -19,25 +18,14 @@ lazy_static! {
         std::env::var("OPENVPN_FILE").unwrap_or("./openvpn/bin/openvpn".to_string());
 }
 
-pub struct ProcessInfo {
-    pub pid: Mutex<Option<u32>>,
-}
-
-impl ProcessInfo {
-    pub fn new() -> Self {
-        Self {
-            pid: Mutex::new(None),
-        }
-    }
-}
 
 #[derive(Debug)]
-pub struct AwsSaml {
-    pub url: String,
-    pub pwd: String,
+pub(crate) struct AwsSaml {
+    pub(crate) url: String,
+    pub(crate) pwd: String,
 }
 
-pub fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
+pub(crate) async fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
     let config = config.as_ref();
     let path = Path::new(SHARED_DIR.as_str()).join(DEFAULT_PWD_FILE);
     if !path.exists() {
@@ -47,7 +35,7 @@ pub fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
             env::current_dir().unwrap()
         );
     }
-    let out = Command::new(OPENVPN_FILE.as_str())
+    let fut = tokio::process::Command::new(OPENVPN_FILE.as_str())
         .arg("--config")
         .arg(config)
         .arg("--verb")
@@ -61,25 +49,25 @@ pub fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
         .arg(DEFAULT_PWD_FILE)
         .stdout(Stdio::piped())
         .current_dir(SHARED_DIR.as_str())
-        .spawn()
-        .unwrap();
+        .kill_on_drop(true)
+        .output();
 
-    let pid = out.id();
-    let stdout = out.stdout.unwrap();
+    let out = tokio::time::timeout(Duration::from_secs(30), fut).await.unwrap().unwrap();
 
-    let buf = BufReader::new(stdout);
+    let stdout = out.stdout;
+
 
     let mut addr = None::<String>;
     let mut pwd = None::<String>;
 
-    for line in buf.lines() {
+    for line in stdout.lines() {
         let line = line.unwrap();
-        tracing::info!("[{pid}] {line}");
+        tracing::info!("[openvpn] {line}");
         let auth_prefix = "AUTH_FAILED,CRV1";
         let prefix = "https://";
 
         if line.contains(auth_prefix) {
-            tracing::info!("[{pid}] Found {line} redirect url");
+            tracing::info!("[openvpn] Found {line} redirect url");
             let find = line.find(prefix).unwrap();
             addr = Some(line[find..].to_string());
 
@@ -100,13 +88,13 @@ pub fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
     }
 }
 
-pub async fn connect_ovpn(
+pub(crate) fn exec_ovpn_in_place(
     config: impl AsRef<Path>,
     addr: String,
     port: u16,
-    saml: Saml,
-    process_info: Arc<ProcessInfo>,
-) -> i32 {
+    pwd: &str,
+    saml: &Saml,
+) -> ! {
     let config = config.as_ref();
     let temp = TempDir::new().unwrap();
     let temp_pwd = temp.child("pwd.txt");
@@ -116,11 +104,12 @@ pub async fn connect_ovpn(
     }
 
     let mut save = File::create(&temp_pwd).unwrap();
-    write!(save, "N/A\nCRV1::{}::{}\n", saml.pwd, saml.data).unwrap();
+    write!(save, "N/A\nCRV1::{}::{}\n", pwd, saml.data).unwrap();
+    drop(save);
 
     let b = std::fs::canonicalize(temp_pwd).unwrap().clone();
 
-    let mut out = tokio::process::Command::new("pkexec")
+    cargo_util::ProcessBuilder::new("pkexec")
         .arg(OPENVPN_FILE.as_str())
         .arg("--config")
         .arg(config)
@@ -140,78 +129,11 @@ pub async fn connect_ovpn(
         .arg(rm_file_command(&b))
         .arg("--auth-user-pass")
         .arg(b)
-        .stdout(Stdio::piped())
-        .current_dir(SHARED_DIR.as_str())
-        .kill_on_drop(true)
-        .spawn()
+        .cwd(SHARED_DIR.as_str())
+        .exec_replace()
         .unwrap();
 
-    let pid = out.id().unwrap();
-    // Set pid
-    {
-        let mut stored_pid = process_info.pid.lock().unwrap();
-        *stored_pid = Some(pid);
-        LocalConfig::save_last_pid(Some(pid));
-    }
-
-    let stdout = out.stdout.take().unwrap();
-
-    let buf = tokio::io::BufReader::new(stdout);
-    let mut lines = buf.lines();
-
-    let mut next = lines.next_line().await;
-
-    loop {
-        if let Ok(Some(line)) = next {
-            tracing::info!("[{pid}] {line}");
-        } else {
-            break;
-        }
-
-        next = lines.next_line().await;
-    }
-
-    out.wait().await.unwrap().code().unwrap()
-}
-
-pub fn kill_openvpn(pid: u32) {
-    if pid == 0 || pid == 1 {
-        LocalConfig::save_last_pid(None);
-        return;
-    }
-
-    let info = Command::new("ps")
-        .arg("-o")
-        .arg("cmd")
-        .arg("-p")
-        .arg(format!("{pid}"))
-        .output()
-        .unwrap();
-
-    if let Ok(msg) = String::from_utf8(info.stdout) {
-        let last = msg.lines().next_back();
-        if let Some(last) = last {
-            if !last.is_empty() && last.chars().next().is_some_and(|v| v == '/') {
-                if last.contains("openvpn --config /")
-                    && last.contains("--auth-user-pass /")
-                    && last.ends_with("pwd.txt")
-                {
-                    let mut p = Command::new("pkexec")
-                        .arg("kill")
-                        .arg(format!("{pid}"))
-                        .spawn()
-                        .unwrap();
-
-                    p.wait().unwrap();
-                    LocalConfig::save_last_pid(None);
-                } else {
-                    LocalConfig::save_last_pid(None);
-                }
-            } else {
-                LocalConfig::save_last_pid(None);
-            }
-        }
-    }
+    unreachable!();
 }
 
 fn rm_file_command(dir: &PathBuf) -> OsString {
