@@ -1,59 +1,57 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use tracing::Instrument;
-use warp::http::StatusCode;
-use warp::reply::WithStatus;
-use warp::{Filter, Rejection};
+use std::io::{BufRead, Read, Write};
+use std::mem;
 
-pub(crate) async fn start_server() -> Saml {
-    tracing::info!("Starting SAML server at 0.0.0.0:35001...");
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<_>(1);
-
-    let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
-
-    tracing::info!("Starting server");
+fn handle_connection(mut stream: std::net::TcpStream) -> String {
+    let mut reader = std::io::BufReader::new(&mut stream);
 
 
-    let saml =
-        warp::post()
-            .and(warp::body::form())
-            .and_then(move |data: HashMap<String, String>| {
-                let sender = tx.clone();
-                {
-                    async move {
-                        let saml = Saml {
-                            data: data["SAMLResponse"].clone(),
-                        };
-                        sender.send(saml).await.unwrap();
-                        println!("Got SAML data!");
+    let mut header = Vec::new();
+    let mut content_len = None::<usize>;
 
-                        Result::<WithStatus<_>, Rejection>::Ok(warp::reply::with_status(
-                            "Got SAMLResponse field, it is now safe to close this window",
-                            StatusCode::OK,
-                        ))
-                    }
-                }
-            });
+    loop {
+        let mut buf = String::new();
+        reader.read_line(&mut buf).unwrap();
+        if buf.trim().is_empty() {
+            break;
+        }
+        if let Some(len_s) = buf.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_len = Some(len_s.trim().parse().unwrap());
+        }
+        header.push(buf);
+    }
 
-    let addr: SocketAddr = ([0, 0, 0, 0], 35001).into();
+    println!("header\n{:?}", &header);
 
-    let (_, fut) = warp::serve(saml).bind_with_graceful_shutdown(addr, async move {
-        server_shutdown_rx.await.unwrap();
-    });
-    let span = tracing::info_span!("Server::run", ?addr);
-    tracing::info!(parent: &span, "listening on http://{}", addr);
+    let mut body = vec![0; content_len.unwrap()];
+    reader.read_exact(&mut body).unwrap();
 
-    let get_data = async {
-        // There must be data in this channel
-        let data = rx.recv().await.unwrap();
+    let status_line = "HTTP/1.1 200 OK";
+    let contents = "Got SAMLResponse field, it is now safe to close this window";
+    let length = contents.len();
 
-        tracing::info!("SAML Data: {:?}...", &data.data[..6]);
+    let response = format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");
 
-        server_shutdown_tx.send(()).unwrap();
-        data
-    };
+    stream.write_all(response.as_bytes()).unwrap();
 
-    tokio::join!(fut.instrument(span), get_data).1
+    let mut form: HashMap<String, String> = form_urlencoded::parse(&body).into_owned().collect();
+
+    tracing::debug!("Got form with keys {:?}", form.keys().collect::<Vec<_>>());
+
+    mem::take(form.get_mut("SAMLResponse").unwrap())
+}
+
+pub(crate) fn run_server_for_saml(port: u16) -> Saml {
+    tracing::info!("Starting SAML server at 0.0.0.0:{port}...");
+
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).unwrap();
+
+    let (socket, _) = listener.accept().unwrap();
+    let saml_response = handle_connection(socket);
+
+    Saml {
+        data: saml_response,
+    }
 }
 
 #[derive(Debug, Clone)]

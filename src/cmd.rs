@@ -1,68 +1,108 @@
+use crate::config::Config;
+use crate::config::SaveOpts;
 use crate::saml_server::Saml;
-use std::env;
 use std::ffi::OsString;
-use std::fs::{remove_file, File};
+use std::fs::File;
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
-use std::process::{ Stdio};
 use std::io::Write;
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::LazyLock;
+use std::thread;
 use std::time::Duration;
-use lazy_static::lazy_static;
-use temp_dir::TempDir;
+use tempfile::TempDir;
 
-const DEFAULT_PWD_FILE: &str = "./pwd.txt";
-
-lazy_static! {
-    static ref SHARED_DIR: String = std::env::var("SHARED_DIR").unwrap_or("./share".to_string());
-    static ref OPENVPN_FILE: String =
-        std::env::var("OPENVPN_FILE").unwrap_or("./openvpn/bin/openvpn".to_string());
-}
-
+static OPENVPN_FILE: LazyLock<String> =
+    LazyLock::new(|| std::env::var("OPENVPN_FILE").unwrap_or("./openvpn/bin/openvpn".to_string()));
 
 #[derive(Debug)]
 pub(crate) struct AwsSaml {
+    pub(crate) ip: String,
+    pub(crate) port: u16,
     pub(crate) url: String,
     pub(crate) pwd: String,
 }
 
-pub(crate) async fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) -> AwsSaml {
-    let config = config.as_ref();
-    let path = Path::new(SHARED_DIR.as_str()).join(DEFAULT_PWD_FILE);
-    if !path.exists() {
-        println!(
-            "{:?} does not exist in {:?}!",
-            path,
-            env::current_dir().unwrap()
-        );
-    }
-    let fut = tokio::process::Command::new(OPENVPN_FILE.as_str())
-        .arg("--config")
-        .arg(config)
-        .arg("--verb")
-        .arg("3")
-        .arg("--proto")
-        .arg("udp")
-        .arg("--remote")
-        .arg(addr)
-        .arg(format!("{port}"))
-        .arg("--auth-user-pass")
-        .arg(DEFAULT_PWD_FILE)
-        .stdout(Stdio::piped())
-        .current_dir(SHARED_DIR.as_str())
-        .kill_on_drop(true)
-        .output();
+struct StandardArgs {
+    _temp: TempDir,
+    password: PathBuf,
+    config: PathBuf,
+}
 
-    let out = tokio::time::timeout(Duration::from_secs(30), fut).await.unwrap().unwrap();
+impl StandardArgs {
+    fn new(password_contents: &str, config: &Config, opts: &SaveOpts) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let password = temp.path().join("pwd.txt");
+        let config_file = temp.path().join("config.ovpn");
+        config.save_config(&config_file, opts);
+
+        let mut save = File::create(&password).unwrap();
+        writeln!(save, "{password_contents}").unwrap();
+
+        Self {
+            _temp: temp,
+            password,
+            config: config_file,
+        }
+    }
+
+    fn args(&self) -> Vec<OsString> {
+        vec![
+            "--config".into(),
+            self.config.clone().into(),
+            "--auth-user-pass".into(),
+            self.password.clone().into(),
+            "--route-up".into(),
+            rm_file_command(&std::fs::canonicalize(&self.password).unwrap().clone()),
+            "--script-security".into(),
+            "2".into(),
+            "--verb".into(),
+            "3".into(),
+            "--proto".into(),
+            "udp".into(),
+        ]
+    }
+}
+
+pub(crate) fn run_ovpn(config: &Config, saml_server_port: u16) -> AwsSaml {
+    let standard_args = StandardArgs::new(
+        &format!("N/A\nACS::{saml_server_port}\n"),
+        config,
+        &SaveOpts {
+            ..Default::default()
+        },
+    );
+
+    let mut command = std::process::Command::new(OPENVPN_FILE.as_str());
+    let command = command.args(standard_args.args()).stdout(Stdio::piped());
+
+    tracing::debug!("Running {:?}", command);
+
+    let mut child = command.spawn().unwrap();
+
+    let span = tracing::debug_span!("openvpn");
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(e) => panic!("Waiting on openvpn failed with {e:?}"),
+        }
+    }
+
+    let out = child.wait_with_output().unwrap();
 
     let stdout = out.stdout;
 
-
     let mut addr = None::<String>;
     let mut pwd = None::<String>;
+    let mut ip = None::<String>;
+    let mut port = None::<u16>;
 
     for line in stdout.lines() {
         let line = line.unwrap();
-        tracing::info!("[openvpn] {line}");
+        tracing::info!(parent: &span, "{line}");
         let auth_prefix = "AUTH_FAILED,CRV1";
         let prefix = "https://";
 
@@ -80,56 +120,58 @@ pub(crate) async fn run_ovpn(config: impl AsRef<Path>, addr: String, port: u16) 
             let e = sub.split(':').nth(1).unwrap();
             pwd = Some(e.to_string());
         }
+
+        if line.contains("[AF_INET]") {
+            let find_start = line.find("[AF_INET]").unwrap() + "[AF_INET]".len();
+            let line = &line[find_start..];
+            let port_start = line.find(':').unwrap();
+            ip = Some(line[..port_start].parse::<IpAddr>().unwrap().to_string());
+            let line = &line[(port_start + 1)..];
+            let port_end = line
+                .char_indices()
+                .find(|(_, c)| !c.is_numeric())
+                .map_or_else(|| line.len(), |(i, _)| i);
+            dbg!(&line);
+            port = Some(line[..port_end].parse::<u16>().unwrap());
+            dbg!(&ip);
+        }
     }
 
-    AwsSaml {
+    dbg!(AwsSaml {
+        ip: ip.unwrap(),
+        port: port.unwrap(),
         url: addr.unwrap(),
         pwd: pwd.unwrap(),
-    }
+    })
 }
 
 pub(crate) fn exec_ovpn_in_place(
-    config: impl AsRef<Path>,
-    addr: String,
+    config: &Config,
+    addr: &str,
     port: u16,
     pwd: &str,
     saml: &Saml,
 ) -> ! {
-    let config = config.as_ref();
-    let temp = TempDir::new().unwrap();
-    let temp_pwd = temp.child("pwd.txt");
+    let standard_args = StandardArgs::new(
+        &format!("N/A\nCRV1::{}::{}\n", pwd, saml.data),
+        config,
+        &SaveOpts {
+            hide_remote: true,
+            ..Default::default()
+        },
+    );
 
-    if temp_pwd.exists() {
-        remove_file(&temp_pwd).unwrap();
-    }
-
-    let mut save = File::create(&temp_pwd).unwrap();
-    write!(save, "N/A\nCRV1::{}::{}\n", pwd, saml.data).unwrap();
-    drop(save);
-
-    let b = std::fs::canonicalize(temp_pwd).unwrap().clone();
+    tracing::info!("Replacing process with openvpn");
 
     cargo_util::ProcessBuilder::new("pkexec")
         .arg(OPENVPN_FILE.as_str())
-        .arg("--config")
-        .arg(config)
-        .arg("--verb")
-        .arg("3")
+        .args(&standard_args.args())
         .arg("--auth-nocache")
         .arg("--inactive")
         .arg("3600")
-        .arg("--proto")
-        .arg("udp")
         .arg("--remote")
         .arg(addr)
         .arg(format!("{port}"))
-        .arg("--script-security")
-        .arg("2")
-        .arg("--route-up")
-        .arg(rm_file_command(&b))
-        .arg("--auth-user-pass")
-        .arg(b)
-        .cwd(SHARED_DIR.as_str())
         .exec_replace()
         .unwrap();
 

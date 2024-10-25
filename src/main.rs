@@ -1,52 +1,53 @@
 #![warn(clippy::pedantic)]
 #![warn(unreachable_pub)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_field_names)]
+#![deny(unsafe_code)]
 
 mod cmd;
 mod config;
-mod dns;
-mod manager;
 mod saml_server;
 
-use clap::Parser;
 use cmd::exec_ovpn_in_place;
 use config::Config;
-use std::path::PathBuf;
+use std::{env, ffi::OsString, thread};
 
-#[derive(clap::Parser)]
-struct Cli {
-    file: PathBuf,
-}
+const SAML_SERVER_PORT: u16 = 35001;
 
 fn main() -> ! {
     tracing_subscriber::fmt::init();
 
-    let cli = Cli::parse();
+    let args: Vec<OsString> = env::args_os().collect();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    if args.len() != 2
+        || args.iter().any(|arg| {
+            arg.as_encoded_bytes()
+                .get(0..1)
+                .unwrap_or(b"")
+                .starts_with(b"-")
+        })
+    {
+        eprintln!("Usage: {} <FILE>", args[0].to_string_lossy());
+        eprintln!();
+        eprintln!("Arguments:");
+        eprintln!("  <FILE>  Path to openvpn config downloaded from AWS.");
+        std::process::exit(1);
+    }
 
-    let config = Config::new(&cli.file);
+    let config = Config::new(&args[1]);
 
-    let (addresses, pwd, data) = runtime.block_on(async {
-        let addresses = dns::resolve_addresses(&config.get_remote().0).await;
+    let (aws_data, data) = thread::scope(|s| {
+        let pwd_t = s.spawn(|| {
+            tracing::info!("Connecting...");
 
-        let (pwd, data) = tokio::join!(
-            manager::connect(&config, &addresses),
-            saml_server::start_server(),
-        );
+            let auth = cmd::run_ovpn(&config, SAML_SERVER_PORT);
 
-        (addresses, pwd, data)
+            open::that(&auth.url).unwrap();
+
+            auth
+        });
+        let data_t = s.spawn(|| saml_server::run_server_for_saml(SAML_SERVER_PORT));
+
+        (pwd_t.join().unwrap(), data_t.join().unwrap())
     });
 
-    let addr = addresses[0].to_string();
-    let port = config.get_remote().1;
-
-    let temp = tempfile::NamedTempFile::new().unwrap();
-    config.save_config(temp.path());
-    exec_ovpn_in_place(temp.path(), addr, port, &pwd, &data);
+    exec_ovpn_in_place(&config, &aws_data.ip, aws_data.port, &aws_data.pwd, &data);
 }

@@ -1,86 +1,68 @@
-use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::Write;
-use std::ops::Deref;
+use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref CLEAN_KEYS: HashSet<String> = {
-        let mut set = HashSet::new();
-        set.insert("remote ".to_string());
-        set.insert("remote-random-hostname".to_string());
-        set.insert("auth-user-pass".to_string());
-        set.insert("auth-federate".to_string());
-        set.insert("auth-retry interact".to_string());
-        set
-    };
-}
+static BAD_PREFIXES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    let mut set = HashSet::new();
+    set.insert("auth-user-pass".to_string());
+    set.insert("auth-federate".to_string());
+    set.insert("auth-retry interact".to_string());
+    set
+});
+
 
 pub(crate) struct Config {
     contents: String,
 }
 
-pub(crate) struct Pwd {
-    pwd: String,
-}
-impl Pwd {
-    pub(crate) fn new(pwd: String) -> Self {
-        Self { pwd }
-    }
+
+#[derive(Default)]
+#[non_exhaustive]
+pub(crate) struct SaveOpts {
+    pub(crate) hide_remote: bool,
 }
 
-impl Deref for Pwd {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.pwd
-    }
-}
 
 impl Config {
     pub(crate) fn new(p: impl AsRef<Path>) -> Config {
+        let p = p.as_ref();
+        let contents = std::fs::read_to_string(p).unwrap();
         Config {
-            contents: std::fs::read_to_string(p).unwrap(),
+            contents,
         }
     }
 
-    pub(crate) fn save_config<P: AsRef<Path>>(&self, path: P) {
+    pub(crate) fn save_config<P: AsRef<Path>>(&self, path: P, opts: &SaveOpts) {
         let path = path.as_ref();
 
-        let new_contents = self
-            .contents
-            .lines()
-            .filter(|l| !has_key(l))
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<String>>()
-            .join("\n");
+        let mut file = BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|e| panic!("Failed to create {path:?}, error was {e:?}.")),
+        );
 
-        let mut file = File::create(path).unwrap();
-        write!(file, "{new_contents}").unwrap();
+        self.contents.lines().filter(|l| !has_key(l, opts)).for_each(|l| {
+            writeln!(file, "{l}")
+                .unwrap_or_else(|e| panic!("Failed writing to {path:?}, error was {e:?}."));
+        });
+
+        drop(file);
+
         tracing::info!("Saved at {:?}", &path);
     }
 
-    pub(crate) fn get_remote(&self) -> (String, u16) {
-        self
-            .contents
-            .lines()
-            .filter(|p| p.starts_with("remote "))
-            .map(|p| {
-                let addr = p["remote ".len()..p.rfind(' ').unwrap()].to_string();
-                let port = p[p.rfind(' ').unwrap() + 1..].parse::<u16>().unwrap();
-                (addr, port)
-            })
-            .next()
-            .unwrap()
-    }
 }
 
-fn has_key(key: &str) -> bool {
-    for k in CLEAN_KEYS.iter() {
+fn has_key(key: &str, opts: &SaveOpts   ) -> bool {
+    for k in BAD_PREFIXES.iter() {
         if key.starts_with(k) {
             return true;
         }
+    }
+
+    if opts.hide_remote && key.starts_with("remote ") {
+        return true;
     }
 
     false
