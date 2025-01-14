@@ -5,7 +5,6 @@ use std::mem;
 fn handle_connection(mut stream: std::net::TcpStream) -> String {
     let mut reader = std::io::BufReader::new(&mut stream);
 
-
     let mut header = Vec::new();
     let mut content_len = None::<usize>;
 
@@ -20,8 +19,6 @@ fn handle_connection(mut stream: std::net::TcpStream) -> String {
         }
         header.push(buf);
     }
-
-    println!("header\n{:?}", &header);
 
     let mut body = vec![0; content_len.unwrap()];
     reader.read_exact(&mut body).unwrap();

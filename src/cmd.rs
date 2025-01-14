@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::config::SaveOpts;
 use crate::saml_server::Saml;
+use std::env;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::BufRead;
@@ -30,12 +31,27 @@ struct StandardArgs {
     config: PathBuf,
 }
 
+#[derive(Default)]
+#[non_exhaustive]
+pub(crate) struct ArgOpts {
+    pub(crate) hide_remote: bool,
+    pub(crate) keep_files: bool,
+}
+
 impl StandardArgs {
-    fn new(password_contents: &str, config: &Config, opts: &SaveOpts) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+    fn new(password_contents: &str, config: &Config, opts: &ArgOpts) -> Self {
+        let temp = tempfile::Builder::new()
+            .keep(opts.keep_files)
+            .tempdir()
+            .unwrap();
         let password = temp.path().join("pwd.txt");
         let config_file = temp.path().join("config.ovpn");
-        config.save_config(&config_file, opts);
+        config.save_config(
+            &config_file,
+            &SaveOpts {
+                hide_remote: opts.hide_remote,
+            },
+        );
 
         let mut save = File::create(&password).unwrap();
         writeln!(save, "{password_contents}").unwrap();
@@ -69,7 +85,7 @@ pub(crate) fn run_ovpn(config: &Config, saml_server_port: u16) -> AwsSaml {
     let standard_args = StandardArgs::new(
         &format!("N/A\nACS::{saml_server_port}\n"),
         config,
-        &SaveOpts {
+        &ArgOpts {
             ..Default::default()
         },
     );
@@ -152,28 +168,37 @@ pub(crate) fn exec_ovpn_in_place(
     pwd: &str,
     saml: &Saml,
 ) -> ! {
+    const KEEP_FILES: bool = false;
     let standard_args = StandardArgs::new(
         &format!("N/A\nCRV1::{}::{}\n", pwd, saml.data),
         config,
-        &SaveOpts {
+        &ArgOpts {
             hide_remote: true,
+            keep_files: KEEP_FILES,
             ..Default::default()
         },
     );
 
     tracing::info!("Replacing process with openvpn");
 
-    cargo_util::ProcessBuilder::new("pkexec")
-        .arg(OPENVPN_FILE.as_str())
+    let cmd = env::var_os("PKEXEC").unwrap_or("pkexec".into());
+    let mut cmd = cargo_util::ProcessBuilder::new(cmd);
+
+    cmd.arg(OPENVPN_FILE.as_str())
         .args(&standard_args.args())
         .arg("--auth-nocache")
         .arg("--inactive")
         .arg("3600")
         .arg("--remote")
         .arg(addr)
-        .arg(format!("{port}"))
-        .exec_replace()
-        .unwrap();
+        .arg(port.to_string());
+
+    if KEEP_FILES {
+        println!("{cmd}");
+        panic!();
+    }
+
+    cmd.exec_replace().unwrap();
 
     unreachable!();
 }

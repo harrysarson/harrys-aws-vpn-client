@@ -40,7 +40,13 @@ fn main() -> ! {
 
             let auth = cmd::run_ovpn(&config, SAML_SERVER_PORT);
 
-            open::that(&auth.url).unwrap();
+            match open::that(&auth.url) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Opening URL error: {e:?}");
+                    eprintln!("Failed to open <{}>. Try opening manually.", &auth.url);
+                }
+            }
 
             auth
         });

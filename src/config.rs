@@ -12,11 +12,9 @@ static BAD_PREFIXES: LazyLock<HashSet<String>> = LazyLock::new(|| {
     set
 });
 
-
 pub(crate) struct Config {
     contents: String,
 }
-
 
 #[derive(Default)]
 #[non_exhaustive]
@@ -24,14 +22,11 @@ pub(crate) struct SaveOpts {
     pub(crate) hide_remote: bool,
 }
 
-
 impl Config {
     pub(crate) fn new(p: impl AsRef<Path>) -> Config {
         let p = p.as_ref();
         let contents = std::fs::read_to_string(p).unwrap();
-        Config {
-            contents,
-        }
+        Config { contents }
     }
 
     pub(crate) fn save_config<P: AsRef<Path>>(&self, path: P, opts: &SaveOpts) {
@@ -42,19 +37,21 @@ impl Config {
                 .unwrap_or_else(|e| panic!("Failed to create {path:?}, error was {e:?}.")),
         );
 
-        self.contents.lines().filter(|l| !has_key(l, opts)).for_each(|l| {
-            writeln!(file, "{l}")
-                .unwrap_or_else(|e| panic!("Failed writing to {path:?}, error was {e:?}."));
-        });
+        self.contents
+            .lines()
+            .filter(|l| !has_key(l, opts))
+            .for_each(|l| {
+                writeln!(file, "{l}")
+                    .unwrap_or_else(|e| panic!("Failed writing to {path:?}, error was {e:?}."));
+            });
 
         drop(file);
 
         tracing::info!("Saved at {:?}", &path);
     }
-
 }
 
-fn has_key(key: &str, opts: &SaveOpts   ) -> bool {
+fn has_key(key: &str, opts: &SaveOpts) -> bool {
     for k in BAD_PREFIXES.iter() {
         if key.starts_with(k) {
             return true;

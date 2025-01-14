@@ -17,4 +17,10 @@ Not suitable for using.
     nix run . -- /home/harrysarson/cvp*n
     ```
 
-There might be some way to run this without nix, the steps above are what I do.
+### Running without nix
+
+There _might_ be some way to run this without nix, you need to:
+
+1. Build a custom version of openvpn using using these patches:
+   <https://raw.githubusercontent.com/samm-git/aws-vpn-client/master/openvpn-v2.5.1-aws.patch>.
+2. Point the vpn client to your custom version of openvpn using `export OPENVPN_FILE=???`.
