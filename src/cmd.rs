@@ -95,7 +95,7 @@ pub(crate) fn run_ovpn(config: &Config, saml_server_port: u16) -> AwsSaml {
 
     tracing::debug!("Running {:?}", command);
 
-    let mut child = command.spawn().unwrap();
+    let mut child = command.spawn().unwrap_or_else(|e| panic!("Failed to run {0}: {e:?}", OPENVPN_FILE.as_str()));
 
     let span = tracing::debug_span!("openvpn");
 

@@ -14,7 +14,7 @@ Not suitable for using.
 2. Download an .ovpn file from a AWS VPN self-service portal.
 3. Run
     ```
-    nix run . -- /home/harrysarson/cvp*n
+    nix run . -- /path/to/vpn-config.ovpn
     ```
 
 ### Running without nix
@@ -23,4 +23,4 @@ There _might_ be some way to run this without nix, you need to:
 
 1. Build a custom version of openvpn using using these patches:
    <https://raw.githubusercontent.com/samm-git/aws-vpn-client/master/openvpn-v2.5.1-aws.patch>.
-2. Point the vpn client to your custom version of openvpn using `export OPENVPN_FILE=???`.
+3. Point the vpn client to your custom version of openvpn using `OPENVPN_FILE=??? cargo run -- /path/to/vpn-config.ovpn`.
