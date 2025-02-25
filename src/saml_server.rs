@@ -24,7 +24,19 @@ fn handle_connection(mut stream: std::net::TcpStream) -> String {
     reader.read_exact(&mut body).unwrap();
 
     let status_line = "HTTP/1.1 200 OK";
-    let contents = "Got SAMLResponse field, it is now safe to close this window";
+    let contents = r#"<!doctype html>
+<html lang="en">
+    <head>
+        <title>AWS VPN connected successfully</title>
+        <meta charset="UTF-8">
+    </head>
+    <body>
+        AWS VPN connected successfully, you can close this tab.
+        <script>window.close();</script>
+    </body>
+</html>
+"#;
+
     let length = contents.len();
 
     let response = format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");

@@ -117,6 +117,12 @@ pub(crate) fn run_ovpn(config: &Config, saml_server_port: u16) -> AwsSaml {
     let mut port = None::<u16>;
 
     for line in stdout.lines() {
+        fn extract_port(s: &str) -> &str {
+            s.char_indices()
+                .find(|(_, c)| !c.is_numeric())
+                .map_or(s, move |(i, _)| &s[..i])
+        }
+
         let line = line.unwrap();
         tracing::info!(parent: &span, "{line}");
         let auth_prefix = "AUTH_FAILED,CRV1";
@@ -138,27 +144,29 @@ pub(crate) fn run_ovpn(config: &Config, saml_server_port: u16) -> AwsSaml {
         }
 
         if line.contains("[AF_INET]") {
-            let find_start = line.find("[AF_INET]").unwrap() + "[AF_INET]".len();
-            let line = &line[find_start..];
-            let port_start = line.find(':').unwrap();
-            ip = Some(line[..port_start].parse::<IpAddr>().unwrap().to_string());
-            let line = &line[(port_start + 1)..];
-            let port_end = line
-                .char_indices()
-                .find(|(_, c)| !c.is_numeric())
-                .map_or_else(|| line.len(), |(i, _)| i);
-            dbg!(&line);
-            port = Some(line[..port_end].parse::<u16>().unwrap());
-            dbg!(&ip);
+            (ip, port) = {
+                let find_start = line.find("[AF_INET]").unwrap() + "[AF_INET]".len();
+                let line = &line[find_start..];
+                let colon_pos = line.find(':').unwrap();
+                let ip = line[..colon_pos].parse::<IpAddr>().unwrap().to_string();
+
+                let port_s = extract_port(&line[(colon_pos + 1)..]);
+                tracing::debug!("Found ip: {ip} and port {port_s} on line {line}");
+                let port = port_s.parse::<u16>().unwrap();
+
+                (Some(ip), Some(port))
+            };
         }
     }
 
-    dbg!(AwsSaml {
+    let ret = AwsSaml {
         ip: ip.unwrap(),
         port: port.unwrap(),
         url: addr.unwrap(),
         pwd: pwd.unwrap(),
-    })
+    };
+    tracing::debug!("Found AWS Saml login info: {ret:?}");
+    ret
 }
 
 pub(crate) fn exec_ovpn_in_place(
